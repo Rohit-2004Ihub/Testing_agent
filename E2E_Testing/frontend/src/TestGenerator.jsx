@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FileCode, Globe, Play, Download, Loader2, CheckCircle2, Copy } from "lucide-react";
+import { FileCode, Globe, Play, Download, Loader2, CheckCircle2, Copy, AlertCircle } from "lucide-react";
 
 export default function TestGenerator() {
   const [file, setFile] = useState(null);
@@ -9,6 +9,9 @@ export default function TestGenerator() {
   const [loading, setLoading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [dockerRunning, setDockerRunning] = useState(false);
+  const [dockerOutput, setDockerOutput] = useState("");
+  const [dockerResults, setDockerResults] = useState(null);
 
   const handleDrag = (e) => {
     e.preventDefault();
@@ -73,6 +76,68 @@ export default function TestGenerator() {
     navigator.clipboard.writeText(runCommand);
     setCopySuccess(true);
     setTimeout(() => setCopySuccess(false), 2000);
+  };
+
+  const handleRunWithDocker = async () => {
+    if (!output) {
+      alert("Please generate a test script first");
+      return;
+    }
+
+    setDockerRunning(true);
+    setDockerOutput("");
+    setDockerResults(null);
+
+    try {
+      const response = await fetch("http://localhost:8000/run_docker_tests", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          test_script: output,
+          project_url: projectUrl
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullOutput = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              fullOutput += data.message + "\n";
+              setDockerOutput(fullOutput);
+              
+              if (data.type === 'result') {
+                setDockerResults(data.result);
+              }
+            } catch (e) {
+              fullOutput += line + "\n";
+              setDockerOutput(fullOutput);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setDockerOutput("Error running Docker tests: " + err.message);
+      console.error(err);
+    } finally {
+      setDockerRunning(false);
+    }
   };
 
   return (
@@ -183,13 +248,32 @@ export default function TestGenerator() {
                   <FileCode className="w-5 h-5 text-indigo-400" />
                   Generated Python Test Script
                 </h2>
-                <button
-                  onClick={handleDownload}
-                  className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
-                >
-                  <Download className="w-4 h-4" />
-                  Download
-                </button>
+                 <div className="flex gap-2">
+                   <button
+                     onClick={handleDownload}
+                     className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-all"
+                   >
+                     <Download className="w-4 h-4" />
+                     Download
+                   </button>
+                   <button
+                     onClick={handleRunWithDocker}
+                     disabled={dockerRunning}
+                     className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white px-4 py-2 rounded-lg transition-all"
+                   >
+                     {dockerRunning ? (
+                       <>
+                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                         Running...
+                       </>
+                     ) : (
+                       <>
+                         <Play className="w-4 h-4" />
+                         Run with Docker
+                       </>
+                     )}
+                   </button>
+                 </div>
               </div>
               <pre className="bg-slate-900/50 p-6 overflow-auto text-sm text-slate-300 font-mono max-h-96">
                 {output}
@@ -231,9 +315,104 @@ export default function TestGenerator() {
                 </button>
               </div>
             </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+           </div>
+         )}
+
+         {/* Docker Results Section */}
+         {(dockerOutput || dockerResults) && (
+           <div className="mt-8 bg-slate-800/50 backdrop-blur-sm rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
+             <div className="p-6 border-b border-slate-700/50">
+               <h2 className="text-xl font-semibold flex items-center gap-2 text-white">
+                 <Play className="w-5 h-5 text-blue-400" />
+                 Docker Test Execution
+               </h2>
+             </div>
+             
+             <div className="p-6">
+               {dockerRunning && (
+                 <div className="mb-6 flex items-center justify-center">
+                   <div className="text-center">
+                     <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                     <p className="text-gray-400">Running tests in Docker container...</p>
+                   </div>
+                 </div>
+               )}
+
+               {dockerOutput && (
+                 <div className="mb-6">
+                   <h3 className="text-lg font-semibold mb-3 text-gray-300">Execution Logs</h3>
+                   <div className="bg-slate-900/50 rounded-xl border border-slate-700/50 p-4 max-h-64 overflow-auto custom-scrollbar">
+                     <pre className="text-sm text-gray-300 leading-relaxed font-mono whitespace-pre-wrap">
+                       {dockerOutput}
+                     </pre>
+                   </div>
+                 </div>
+               )}
+
+               {dockerResults && (
+                 <div>
+                   <h3 className="text-lg font-semibold mb-3 text-gray-300">Test Results</h3>
+                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                     <div className="bg-slate-900/50 rounded-xl border border-slate-700/50 p-4">
+                       <div className="flex items-center gap-2 mb-2">
+                         <CheckCircle2 className="w-5 h-5 text-green-400" />
+                         <span className="font-semibold text-green-400">Tests Passed</span>
+                       </div>
+                       <p className="text-2xl font-bold text-green-400">{dockerResults.passed || 0}</p>
+                     </div>
+                     <div className="bg-slate-900/50 rounded-xl border border-slate-700/50 p-4">
+                       <div className="flex items-center gap-2 mb-2">
+                         <AlertCircle className="w-5 h-5 text-red-400" />
+                         <span className="font-semibold text-red-400">Tests Failed</span>
+                       </div>
+                       <p className="text-2xl font-bold text-red-400">{dockerResults.failed || 0}</p>
+                     </div>
+                     <div className="bg-slate-900/50 rounded-xl border border-slate-700/50 p-4">
+                       <div className="flex items-center gap-2 mb-2">
+                         <FileCode className="w-5 h-5 text-blue-400" />
+                         <span className="font-semibold text-blue-400">Total Tests</span>
+                       </div>
+                       <p className="text-2xl font-bold text-blue-400">{dockerResults.total || 0}</p>
+                     </div>
+                   </div>
+                   
+                   {dockerResults.reportUrl && (
+                     <div className="mt-4">
+                       <a
+                         href={dockerResults.reportUrl}
+                         target="_blank"
+                         rel="noopener noreferrer"
+                         className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg transition-colors text-white"
+                       >
+                         <Download className="w-4 h-4" />
+                         View Full Report
+                       </a>
+                     </div>
+                   )}
+                 </div>
+               )}
+             </div>
+           </div>
+         )}
+       </div>
+
+       <style>{`
+         .custom-scrollbar::-webkit-scrollbar {
+           width: 8px;
+           height: 8px;
+         }
+         .custom-scrollbar::-webkit-scrollbar-track {
+           background: rgba(51, 65, 85, 0.3);
+           border-radius: 4px;
+         }
+         .custom-scrollbar::-webkit-scrollbar-thumb {
+           background: rgba(99, 102, 241, 0.5);
+           border-radius: 4px;
+         }
+         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+           background: rgba(99, 102, 241, 0.7);
+         }
+       `}</style>
+     </div>
+   );
 }

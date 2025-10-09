@@ -3,14 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 import json
 import pandas as pd
-from langgraph_agent import setup_python_playwright, safe_base_path, run_playwright_generator
-from pathlib import Path
+from E2E_Agent import setup_python_playwright, safe_base_path
+from E2E_Agent import run_playwright_generator
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # your React dev server
+    allow_origins=["*"],  # 👈 or specify ["http://localhost:3000"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,15 +34,9 @@ def auto_setup(path: str = Query(...)):
 
 
 @app.post("/parse_input")
-def generate_test_script(
-    file: UploadFile = File(...),
-    project_url: str = Form(...)
-):
-    """
-    Generate Playwright test script using LangGraph + Gemini 2.5 Flash agent.
-    """
+async def generate_test_script(file: UploadFile = File(...), project_url: str = Form(...)):
     try:
-        # Read the uploaded file into a DataFrame
+        # Load file
         if file.filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file.file)
         elif file.filename.endswith(".csv"):
@@ -50,15 +44,29 @@ def generate_test_script(
         else:
             return JSONResponse(status_code=400, content={"error": "Invalid file type. Must be CSV or Excel."})
 
-        required_cols = ["Scenario", "Scenario Description", "Steps to Execute", "Expected Result"]
+        # Strip column names
+        df.columns = [col.strip() for col in df.columns]
+
+        # Only required columns
+        required_cols = ["Scenario", "Scenario Description", "Steps to Execute", "Test Data", "Expected Result"]
+
+        # Check missing
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
             return JSONResponse(status_code=400, content={"error": f"Missing columns: {', '.join(missing_cols)}"})
 
-        test_cases = df[required_cols].to_dict(orient="records")
+        # Take only required columns (ignore extra ones)
+        df = df[required_cols]
 
-        # Run the full LangGraph workflow
+        # Convert to list of dicts for the generator
+        test_cases = df.to_dict(orient="records")
+
+        # Run LangGraph Playwright generator
         script_output = run_playwright_generator(test_cases, project_url)
+
+        if not script_output.strip():
+            return JSONResponse(status_code=500, content={"error": "No script generated. Check your API key or model."})
+
         return {"script": script_output}
 
     except Exception as e:

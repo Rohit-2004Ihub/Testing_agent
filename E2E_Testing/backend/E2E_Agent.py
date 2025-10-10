@@ -120,49 +120,45 @@ addopts = --html={base_path}/reports/report.html --self-contained-html --capture
     if stream: yield {"message": "Python Playwright auto-setup complete! Screenshots embedded inside HTML report.", "type": "success"}
 
 
-
-from typing import List, Dict, TypedDict
 import os
-from langgraph.graph import StateGraph, END
+from typing import List, Dict, TypedDict
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import StateGraph, END
 
-
+# ------------------------
+# TypedDict for workflow state
+# ------------------------
 class TestGenState(TypedDict):
     project_url: str
     test_cases: List[Dict]
     generated_scripts: List[str]
-
+    final_output: str
 
 # ------------------------
 # Node 1: Parse Input
 # ------------------------
 def parse_input(state: TestGenState) -> TestGenState:
     """
-    Parse test case data including Scenario, Description, Steps, Expected Result, and Test Data.
+    Extract only relevant columns: Scenario, Description, Steps, Test Data, Expected Result
     """
     parsed = []
     for case in state["test_cases"]:
         parsed.append({
-            "scenario": case.get("Scenario", "").strip(),
-            "description": case.get("Scenario Description", "").strip(),
-            "steps": case.get("Steps to Execute", "").strip(),
-            "expected": case.get("Expected Result", "").strip(),
-            "test_data": case.get("Test Data", "").strip(),  # ✅ new column
+            "scenario": str(case.get("Scenario", "")).strip(),
+            "description": str(case.get("Scenario Description", "")).strip(),
+            "steps": str(case.get("Steps to Execute", "")).strip(),
+            "test_data": case.get("Test Data", {}),
+            "expected": str(case.get("Expected Result", "")).strip(),
         })
     state["test_cases"] = parsed
     return state
 
-
 # ------------------------
-# Node 2: Generate Script using Gemini
-# ------------------------
-# ------------------------
-# Node 2: Generate Script using Gemini (Enhanced)
+# Node 2: Generate Playwright Script
 # ------------------------
 def generate_script_node(state: TestGenState) -> TestGenState:
     """
-    Generate clean, minimal Playwright Python (sync API) test scripts that dynamically
-    handle only the UI elements mentioned in each test case.
+    Generate minimal, runnable Playwright Python scripts from test case steps and test data.
     """
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -176,49 +172,35 @@ def generate_script_node(state: TestGenState) -> TestGenState:
 
     scripts = []
     for idx, case in enumerate(state["test_cases"], start=1):
-        # Detect which elements are mentioned in the test steps
-        steps_lower = (case["steps"] + " " + case["test_data"]).lower()
-        handle_dropdown = "dropdown" in steps_lower or "select" in steps_lower
-        handle_checkbox = "checkbox" in steps_lower or "policy" in steps_lower
-        handle_button = "click" in steps_lower or "button" in steps_lower
-        handle_input = "type" in steps_lower or "fill" in steps_lower or "input" in steps_lower
-
-        # Construct element handling instructions dynamically
-        element_handling = ""
-        if handle_dropdown:
-            element_handling += "- Select dropdown values using visible text only if mentioned.\n"
-        if handle_checkbox:
-            element_handling += "- Check only the checkboxes explicitly mentioned.\n"
-        if handle_button:
-            element_handling += "- Click only buttons explicitly mentioned.\n"
-        if handle_input:
-            element_handling += "- Fill input fields only as per Test Data.\n"
-
         prompt = f"""
-Generate a clean, ready-to-run Python Playwright test using sync API for pytest.
+You are a QA engineer. Generate a **minimal, runnable Python Playwright script** using sync API for pytest.
 
 Project URL: {state['project_url']}
 Scenario: {case['scenario']}
 Description: {case['description']}
-Steps: {case['steps']}
+Steps to Execute: {case['steps']}
 Test Data: {case['test_data']}
 Expected Result: {case['expected']}
 
-Requirements:
-- Launch Chromium in **headed mode** (headless=False)
-- Name the function: test_case_{idx}
-- Navigate to project URL and execute only the steps mentioned
-- Dynamically handle UI elements **only if mentioned in the steps or Test Data**:
-{element_handling}
-- Include assertions for expected results
-- Include try/except with screenshot on failure
-- Keep the code minimal, concise, and ready-to-run
-- Do NOT include extra print statements or redundant fallback locators
-- Output Python code only, no markdown, no extra comments
+Instructions:
+1. Launch Chromium (headless=False) and navigate to Project URL once.
+2. Map steps literally:
+   - "fill <field>": fill input with value from Test Data
+   - "click <button>": click the button
+   - "select <dropdown>": select value from Test Data
+   - "check <checkbox>": check it
+3. Include try/except/finally:
+   - Take screenshot on failure: test_case_{idx}_failure.png
+   - Close browser in finally
+   - Call pytest.fail() on exception
+4. Assert expected result if applicable (URL change or visible element)
+5. Name function test_case_{idx}
+6. Output only Python code, no markdown or explanations.
 """
 
         try:
             response = llm.invoke(prompt)
+            # Extract content
             if hasattr(response, "content"):
                 resp_text = response.content
             elif isinstance(response, dict) and "output_text" in response:
@@ -226,28 +208,29 @@ Requirements:
             else:
                 resp_text = str(response)
 
-            if not resp_text.strip():
-                resp_text = f"# Failed to generate script for '{case['scenario']}'"
+            # Clean output
+            resp_text = resp_text.strip().replace("```python", "").replace("```", "")
+            if not resp_text:
+                resp_text = f"import pytest\n\ndef test_case_{idx}():\n    pass"
 
             scripts.append(resp_text)
 
         except Exception as e:
-            scripts.append(f"# Error generating script for '{case['scenario']}': {e}")
+            scripts.append(f"import pytest\n\ndef test_case_{idx}():\n    pytest.fail('Error generating script: {e}')")
 
     state["generated_scripts"] = scripts
     return state
-
-
-
 
 # ------------------------
 # Node 3: Format Output
 # ------------------------
 def format_output(state: TestGenState) -> TestGenState:
+    """
+    Combine all generated scripts into a single output string
+    """
     combined = "\n\n" + ("#" * 80 + "\n\n").join(state["generated_scripts"])
     state["final_output"] = combined
     return state
-
 
 # ------------------------
 # Build LangGraph Agent
@@ -263,22 +246,19 @@ def build_langgraph_agent():
     workflow.add_edge("format_output", END)
     return workflow.compile()
 
-
 # ------------------------
 # Callable function
 # ------------------------
 def run_playwright_generator(test_cases: List[Dict], project_url: str) -> str:
     """
-    Run the complete LangGraph workflow and return combined Playwright test scripts.
+    Run the workflow and return combined Playwright test scripts.
     """
     graph = build_langgraph_agent()
     state: TestGenState = {
         "project_url": project_url,
         "test_cases": test_cases,
-        "generated_scripts": []
+        "generated_scripts": [],
+        "final_output": ""
     }
     result = graph.invoke(state)
-
-    final_output = result.get("final_output") or "\n\n".join(result.get("generated_scripts", []))
-    return final_output
-
+    return result.get("final_output") or "\n\n".join(result.get("generated_scripts", []))

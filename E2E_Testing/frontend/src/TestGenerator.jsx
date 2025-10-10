@@ -213,6 +213,7 @@ export default function TestGenerator() {
                 placeholder="https://example.com"
                 value={projectUrl}
                 onChange={e => setProjectUrl(e.target.value)}
+                onPaste={e => setProjectUrl(e.clipboardData.getData("text"))}
                 className="w-full bg-slate-700/50 border border-slate-600 rounded-xl py-3 pl-12 pr-4 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
               />
             </div>
